@@ -1,5 +1,6 @@
 # Next
 
+* Fixed FTP and FTPS creation of nested directories and missing-path listing replies for camera uploads; FTP error logs now include the command name.
 * Changed navigation to hash-based URLs while preserving existing page bookmarks.
 * Fixed blank settings pages when the updated frontend connects to a server that has not restarted yet.
 * Added configurable FTP and FTPS passive port ranges with persistent settings, conflict checks, and confirmation before disconnecting clients.
