@@ -1,5 +1,6 @@
 # Next
 
+* Added Debug → Logs with persistent FTP, FTPS, SFTP, and SMB activity, users, paths, client IPs, results, search, filters, and auto-refresh.
 * Added logo icons for Apple home-screen shortcuts, web app shortcuts, and browser favicons.
 * Fixed FTP and FTPS creation of nested directories and missing-path listing replies for camera uploads; FTP error logs now include the command name.
 * Changed navigation to hash-based URLs while preserving existing page bookmarks.

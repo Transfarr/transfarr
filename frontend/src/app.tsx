@@ -20,6 +20,7 @@ import {
   Search,
   FolderOpen,
   Network,
+  FileText,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,6 +33,7 @@ import { ViewToggle } from "@/components/view-toggle";
 import { PathPicker } from "@/components/path-picker";
 import { DeleteConfirmDialog } from "@/components/delete-confirm-dialog";
 import { ProtocolSettings } from "@/pages/protocol-settings";
+import { Logs } from "@/pages/logs";
 import { apiRequest } from "@/lib/api";
 import {
   protocolNames,
@@ -148,7 +150,7 @@ export function App() {
     ? protocolNames[location.pathname.split("/")[2] as Protocol] || "Settings"
     : location.pathname === "/users"
       ? "Users"
-      : "Folders";
+      : location.pathname === "/logs" ? "Logs" : "Folders";
   return (
     <div className="min-h-dvh bg-muted/25 md:grid md:grid-cols-[15rem_minmax(0,1fr)]">
       {menu && (
@@ -250,6 +252,10 @@ export function App() {
               </NavLink>
             ))}
           </div>
+          <p className="mt-6 mb-2 px-2 text-[11px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">Debug</p>
+          <NavLink to="/logs" className={({ isActive }) =>
+            `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring ${isActive ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-xs" : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground"}`
+          }><FileText className="size-4" />Logs</NavLink>
         </nav>
         <div className="shrink-0 border-t px-3 pt-3 pb-5">
           <ThemeSwitch />
@@ -280,6 +286,7 @@ export function App() {
               </p>
             )}
             <Routes>
+              <Route path="/logs" element={<Logs />} />
               <Route path="/folders" element={<Resources kind="folders" mobileActions={mobileActions} />} />
               <Route path="/users" element={<Resources kind="users" mobileActions={mobileActions} />} />
               {(["smb", "ftp", "ftps", "sftp"] as const).map((protocol) => (

@@ -186,6 +186,7 @@ impl Default for ActiveConnections {
 
 /// Top-level immutable-ish state shared across connections.
 pub struct ServerState {
+    pub audit_sink: std::sync::RwLock<Option<crate::audit::AuditSink>>,
     pub config: ServerConfig,
     pub users: ServerUsers,
     pub shares: ServerShares,
@@ -200,6 +201,7 @@ pub struct ServerState {
 impl ServerState {
     pub fn new(config: ServerConfig, users: ServerUsers, shares: Vec<Arc<ShareBindings>>) -> Self {
         Self {
+            audit_sink: std::sync::RwLock::new(None),
             config,
             users,
             shares: ServerShares::new(shares),

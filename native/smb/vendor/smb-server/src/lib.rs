@@ -16,6 +16,7 @@
 //! # Ok(()) }
 //! ```
 
+pub mod audit;
 mod backend;
 mod builder;
 pub(crate) mod conn;

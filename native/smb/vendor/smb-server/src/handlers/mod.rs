@@ -40,7 +40,9 @@ pub async fn dispatch_command(
     hdr: &Smb2Header,
     body: &[u8],
 ) -> HandlerResponse {
-    match hdr.command {
+    let sink = server.audit_sink.read().unwrap().clone();
+    let event = if sink.is_some() { Some(crate::audit::AuditEvent::capture(conn, hdr, body).await) } else { None };
+    let response = match hdr.command {
         Command::Negotiate => negotiate::handle(server, conn, hdr, body).await,
         Command::SessionSetup => session_setup::handle(server, conn, hdr, body).await,
         Command::Logoff => logoff::handle(server, conn, hdr, body).await,
@@ -60,5 +62,18 @@ pub async fn dispatch_command(
         Command::SetInfo => set_info::handle(server, conn, hdr, body).await,
         Command::OplockBreak => oplock_break::handle(server, conn, hdr, body).await,
         Command::Cancel => HandlerResponse::err(ntstatus::STATUS_INVALID_PARAMETER),
+    };
+    if let (Some(sink), Some(mut event)) = (sink, event) {
+        event.status = response.status;
+        if matches!(hdr.command, Command::SessionSetup) && response.status == ntstatus::STATUS_SUCCESS {
+            if let Ok(session) = shared::lookup_session(conn, response.override_session_id.unwrap_or(hdr.session_id)).await {
+                event.user = match &session.read().await.identity {
+                    crate::Identity::Anonymous => "anonymous".into(),
+                    crate::Identity::User { user, .. } => user.clone(),
+                };
+            }
+        }
+        sink(event);
     }
+    response
 }

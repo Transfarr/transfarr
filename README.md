@@ -13,9 +13,12 @@
 * Browse your filesystem and choose which protocols each folder uses.
 * Discover available SMB shares directly from Finder or another SMB client.
 * Configure ports and see whether services are online, unused, or have a port conflict.
+* Inspect file protocol activity in **Debug → Logs**, including users, paths, client IPs, and results.
 * Manage everything through a React + shadcn web interface based on [Containarr](https://github.com/Containarr/containarr).
 
 > 💡 All four protocols run in the same Node.js process. Transfarr manages its own users; it does not create Linux accounts or run separate file-sharing daemons.
+
+**Debug → Logs** records new FTP, FTPS, SFTP, and SMB actions, including login attempts, file operations, and failures. Search by user, action, path, or client IP; filter by protocol or result. Expand an entry to see its server path and protocol details. The latest 100,000 events persist in SQLite across restarts. Auto-refresh runs every five seconds on the newest page. Web UI actions, passwords, and file contents are excluded; activity from before logging was enabled is not available.
 
 # Screenshots
 

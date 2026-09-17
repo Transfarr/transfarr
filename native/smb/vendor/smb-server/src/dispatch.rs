@@ -311,11 +311,21 @@ async fn dispatch_one(
 
         // Verify signature on incoming request (when applicable).
         if let Err(status) = verify_request_signature(server, conn, &req_hdr, frame).await {
+            let sink = server.audit_sink.read().unwrap().clone();
+            if let Some(sink) = sink {
+                let mut event = crate::audit::AuditEvent::capture(conn, &req_hdr, body_bytes).await;
+                event.status = status;
+                sink(event);
+            }
             return Some(build_response_bytes(conn, &req_hdr, HandlerResponse::err(status)).await);
         }
 
         // CANCEL is fire-and-forget — no response.
         if cmd == Command::Cancel {
+            let sink = server.audit_sink.read().unwrap().clone();
+            if let Some(sink) = sink {
+                sink(crate::audit::AuditEvent::capture(conn, &req_hdr, body_bytes).await);
+            }
             debug!("CANCEL received; no response");
             return None;
         }

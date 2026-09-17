@@ -32,6 +32,7 @@ struct Config {
 // A native library loaded by Node, never a child process or system daemon.
 #[napi]
 pub struct SmbBinding {
+    audit: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     running: Arc<
         Mutex<
             Option<(
@@ -48,6 +49,7 @@ impl SmbBinding {
     #[napi(constructor)]
     pub fn new() -> Self {
         Self {
+            audit: Arc::new(std::sync::Mutex::new(Vec::new())),
             running: Arc::new(Mutex::new(None)),
         }
     }
@@ -56,6 +58,7 @@ impl SmbBinding {
     pub async fn configure(&self, json: String) -> Result<()> {
         let config: Config =
             serde_json::from_str(&json).map_err(|e| Error::from_reason(e.to_string()))?;
+        let paths: Vec<_> = config.folders.iter().map(|folder| (folder.name.clone(), folder.path.clone())).collect();
         let mut builder = SmbServer::builder().listen(
             config
                 .listen
@@ -91,6 +94,37 @@ impl SmbBinding {
         let server = builder
             .build()
             .map_err(|e| Error::from_reason(e.to_string()))?;
+        let audit = self.audit.clone();
+        *server.state().audit_sink.write().unwrap() = Some(Arc::new(move |event| {
+            let mut entries = audit.lock().unwrap();
+            let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+            // Bound the native queue if Node is temporarily busy; report any lost events.
+            if entries.len() >= 10000 {
+                let last = entries.last_mut().unwrap();
+                if last["action"] == "Log overflow" {
+                    let count = last["dropped"].as_u64().unwrap_or(0) + 1;
+                    last["dropped"] = count.into();
+                    last["details"] = format!("{count} SMB events could not be retained while the log consumer was busy").into();
+                } else {
+                    entries.push(serde_json::json!({ "timestamp": timestamp, "protocol": "smb", "user": "System", "action": "Log overflow", "outcome": "failure", "dropped": 1, "details": "1 SMB event could not be retained while the log consumer was busy" }));
+                }
+                return;
+            }
+            let mut parts = event.path.trim_start_matches('/').splitn(2, '/');
+            let share = parts.next().unwrap_or("");
+            let relative = parts.next().unwrap_or("");
+            let host_path = paths.iter().find(|(name, _)| name == share)
+                .map(|(_, root)| std::path::Path::new(root).join(relative).to_string_lossy().into_owned()).unwrap_or_default();
+            let outcome = match event.status {
+                smb_server::ntstatus::STATUS_SUCCESS => "success",
+                smb_server::ntstatus::STATUS_MORE_PROCESSING_REQUIRED | smb_server::ntstatus::STATUS_PENDING |
+                smb_server::ntstatus::STATUS_END_OF_FILE | smb_server::ntstatus::STATUS_NO_MORE_FILES => "info",
+                _ => "failure",
+            };
+            entries.push(serde_json::json!({ "timestamp": timestamp, "protocol": "smb", "user": event.user,
+                "action": event.action, "path": event.path, "destination": event.destination, "hostPath": host_path,
+                "remoteAddress": event.remote_address, "outcome": outcome, "details": format!("SMB status 0x{:08X}", event.status) }));
+        }));
         let mut running = self.running.lock().await;
         // Reconfiguration disconnects existing clients so revoked access cannot linger.
         if let Some((shutdown, task, _)) = running.take() {
@@ -116,6 +150,12 @@ impl SmbBinding {
             Some((_, _, config)) => config.connection_count().await as u32,
             None => 0,
         }
+    }
+
+    #[napi]
+    pub fn drain_logs(&self) -> String {
+        let entries = std::mem::take(&mut *self.audit.lock().unwrap());
+        serde_json::to_string(&entries).unwrap_or_else(|_| "[]".into())
     }
 
     #[napi]

@@ -27,6 +27,7 @@ pub type PendingAuth = Arc<Mutex<(NtlmServer, bool)>>;
 
 /// One connection's negotiated state and its session/tree/open tables.
 pub struct Connection {
+    pub remote_address: String,
     pub server_guid: Uuid,
     pub client_guid: tokio::sync::RwLock<Uuid>,
     pub dialect: tokio::sync::RwLock<Option<Dialect>>,
@@ -59,6 +60,7 @@ pub struct Connection {
 impl Connection {
     pub fn new(server_guid: Uuid, max_read_size: u32, max_write_size: u32) -> Self {
         Self {
+            remote_address: String::new(),
             server_guid,
             client_guid: tokio::sync::RwLock::new(Uuid::nil()),
             dialect: tokio::sync::RwLock::new(None),
