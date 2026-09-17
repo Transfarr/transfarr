@@ -1,0 +1,11 @@
+.git
+node_modules
+frontend/node_modules
+/public
+volumes
+native/smb/target
+native/smb/*.node
+.env
+screenshots
+.DS_Store
+*.log

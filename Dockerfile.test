@@ -1,0 +1,10 @@
+FROM ghcr.io/transfarr/transfarr:test
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends smbclient python3-impacket && rm -rf /var/lib/apt/lists/*
+COPY package*.json ./
+RUN npm ci --include=dev --ignore-scripts
+RUN npm rebuild sqlite3
+COPY test ./test
+COPY CHANGELOG.md ./
+USER 1000:1000
+CMD ["npm", "run", "test:integration"]

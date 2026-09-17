@@ -1,0 +1,42 @@
+{
+  "name": "@transfarr/transfarr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "dev:frontend": "npm --prefix frontend run dev -- --host",
+    "build": "npm --prefix frontend run build",
+    "build:native": "node scripts/build-native.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:integration": "node --test --test-concurrency=1 test/integration/*.test.mjs",
+    "start:docker": "docker compose up --build",
+    "build:docker": "docker build -t ghcr.io/transfarr/transfarr:latest .",
+    "start:local": "node --env-file-if-exists=.env scripts/start-local.mjs"
+  },
+  "dependencies": {
+    "@sequelize/core": "^7.0.0-alpha.48",
+    "@sequelize/sqlite3": "^7.0.0-alpha.48",
+    "express": "^5.2.1",
+    "ftp-srv": "4.6.3",
+    "selfsigned": "^5.5.0",
+    "ssh2": "^1.17.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "basic-ftp": "^5.2.0",
+    "ssh2-sftp-client": "^12.0.1"
+  },
+  "overrides": {
+    "tar": "^7.5.22",
+    "@tootallnate/once": "^2.0.1",
+    "ftp-srv": {
+      "ip": "npm:@webpod/ip@0.6.1",
+      "uuid": "^11.1.1"
+    }
+  }
+}

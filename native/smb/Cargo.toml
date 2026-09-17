@@ -1,0 +1,18 @@
+[package]
+name = "transfarr-smb"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", features = ["tokio_rt"] }
+napi-derive = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+smb-server = { path = "vendor/smb-server" }
+
+[build-dependencies]
+napi-build = "2"
