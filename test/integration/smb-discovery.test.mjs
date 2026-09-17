@@ -32,20 +32,27 @@ test("SMB discovery lists only authorized shares using real RPC clients", { time
   const { stdout } = await promisify(execFile)(process.env.TRANSFARR_RPC_PYTHON || "python3", ["test/integration/smb-discovery.py", String(port)], { timeout: 80000 });
   t.diagnostic(stdout.trim());
   await server.stop();
+  server.drainLogs();
   const aliasProbe = net.createServer();
   await new Promise(resolve => aliasProbe.listen(0, "0.0.0.0", resolve));
   const aliasPort = aliasProbe.address().port;
+  const activity = [];
   const store = {
     data: {
       users: config.users.map(user => ({ id: user.username, username: user.username, encryptedPassword: user.password })),
       folders: config.folders.map(folder => ({ ...folder, protocols: ["smb"], permissions: Object.fromEntries(folder.grants.map(grant => [grant.username, grant.write ? "write" : "read"])) })),
     },
     decrypt: value => value,
+    audit: entry => activity.push(entry),
   };
   store.data.folders.push({ name: "FTP-only", path: directory, protocols: ["ftp"], permissions: { reader: "read" } });
   const protocols = new Protocols(store, { root: directory, ports: { smb: port }, httpPort: 0, passiveMin: 65000, smbDiscovery: true, smbDiscoveryPort: aliasPort });
   protocols.smb = server;
-  t.after(() => protocols.stop());
+  t.after(async () => {
+    await protocols.stop();
+    assert.ok(activity.some(entry => entry.protocol === "smb" && entry.action === "Login" && entry.user === "reader" && entry.outcome === "success"));
+    assert.deepEqual(JSON.parse(server.drainLogs()), []);
+  });
   await protocols.restart("smb");
   assert.equal(protocols.status.smb.running, true);
   assert.equal(protocols.status.smb.discovery.running, false);
