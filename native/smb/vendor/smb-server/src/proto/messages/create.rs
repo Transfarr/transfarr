@@ -6,7 +6,7 @@
 //! pair, and 8-byte alignment.
 
 use binrw::{BinRead, BinWrite, binrw};
-use std::io::Cursor;
+use std::io::{Cursor, SeekFrom};
 
 use crate::proto::error::{ProtoError, ProtoResult};
 
@@ -65,11 +65,11 @@ pub struct CreateRequest {
     pub create_contexts_offset: u32,
     pub create_contexts_length: u32,
     /// UTF-16LE filename.
-    #[br(count = name_length as usize)]
+    #[br(count = name_length as usize, seek_before = SeekFrom::Start(name_offset.saturating_sub(64) as u64))]
     pub name: Vec<u8>,
     /// Raw create-contexts chain bytes; parse with
     /// [`CreateContext::parse_chain`].
-    #[br(count = create_contexts_length as usize)]
+    #[br(count = create_contexts_length as usize, seek_before = SeekFrom::Start(create_contexts_offset.saturating_sub(64) as u64))]
     pub create_contexts: Vec<u8>,
 }
 
@@ -88,6 +88,20 @@ impl CreateRequest {
     }
 
     pub fn parse(buf: &[u8]) -> ProtoResult<Self> {
+        if buf.len() < 56 {
+            return Err(ProtoError::Malformed("create request too short"));
+        }
+        // Offsets are relative to the SMB2 header, not the end of the name.
+        // Apple clients pad the name before the 8-byte-aligned context chain.
+        let name_offset = u16::from_le_bytes(buf[44..46].try_into().unwrap()) as u64;
+        let name_length = u16::from_le_bytes(buf[46..48].try_into().unwrap()) as u64;
+        let context_offset = u32::from_le_bytes(buf[48..52].try_into().unwrap()) as u64;
+        let context_length = u32::from_le_bytes(buf[52..56].try_into().unwrap()) as u64;
+        for (offset, length) in [(name_offset, name_length), (context_offset, context_length)] {
+            if length != 0 && (offset < 120 || offset + length > buf.len() as u64 + 64) {
+                return Err(ProtoError::Malformed("create buffer out of range"));
+            }
+        }
         Ok(Self::read(&mut Cursor::new(buf))?)
     }
     pub fn write_to(&self, out: &mut Vec<u8>) -> ProtoResult<()> {

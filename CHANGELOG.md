@@ -1,5 +1,6 @@
 # Next
 
+* Fixed SMB maximal-access replies and padded CREATE requests for Apple client permission checks, while preserving read-only share restrictions.
 * Fixed the SMB discovery integration test fixture to support activity logging and verify log draining during shutdown.
 * Added Debug → Logs with persistent FTP, FTPS, SFTP, and SMB activity, users, paths, client IPs, results, search, filters, and auto-refresh.
 * Added logo icons for Apple home-screen shortcuts, web app shortcuts, and browser favicons.

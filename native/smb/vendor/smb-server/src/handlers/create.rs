@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::proto::header::Smb2Header;
-use crate::proto::messages::{CreateRequest, CreateResponse};
+use crate::proto::messages::{CreateContext, CreateRequest, CreateResponse};
 use tracing::{debug, warn};
 
 use crate::backend::{OpenIntent, OpenOptions};
@@ -55,6 +55,16 @@ pub async fn handle(
         Ok(r) => r,
         Err(_) => return HandlerResponse::err(ntstatus::STATUS_INVALID_PARAMETER),
     };
+    let contexts = match CreateContext::parse_chain(&req.create_contexts) {
+        Ok(contexts) => contexts,
+        Err(_) => return HandlerResponse::err(ntstatus::STATUS_INVALID_PARAMETER),
+    };
+    let maximal_access_request = contexts
+        .iter()
+        .find(|ctx| ctx.name == CreateContext::NAME_MXAC);
+    if maximal_access_request.is_some_and(|ctx| !matches!(ctx.data.len(), 0 | 8)) {
+        return HandlerResponse::err(ntstatus::STATUS_INVALID_PARAMETER);
+    }
 
     let tree_arc = match lookup_session_tree(conn, hdr).await {
         Ok(t) => t,
@@ -156,9 +166,9 @@ pub async fn handle(
             | FILE_WRITE_ATTRIBUTES
             | DELETE
             | GENERIC_WRITE
-            | GENERIC_ALL
-            | MAX_ALLOWED)
-        != 0;
+            | GENERIC_ALL)
+        != 0
+        || (req.desired_access & MAX_ALLOWED != 0 && granted.allows_write());
 
     // Reject writes on a read-only tree.
     if want_write && !granted.allows_write() {
@@ -211,6 +221,36 @@ pub async fn handle(
         }
     };
 
+    // Report the user's share permissions even when this particular handle
+    // was opened only to read attributes. Apple clients use MxAc for access checks.
+    let mut create_contexts = Vec::new();
+    if let Some(ctx) = maximal_access_request {
+        let unchanged = ctx.data.len() == 8
+            && u64::from_le_bytes(ctx.data.as_slice().try_into().unwrap()) == info.change_time;
+        let status: u32 = if unchanged {
+            0xC000_0073
+        } else {
+            ntstatus::STATUS_SUCCESS
+        }; // STATUS_NONE_MAPPED
+        let access: u32 = if unchanged {
+            0
+        } else if granted.allows_write() {
+            0x001F_01FF // FILE_ALL_ACCESS
+        } else {
+            0x0012_00A9 // FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+        };
+        let mut data = status.to_le_bytes().to_vec();
+        data.extend_from_slice(&access.to_le_bytes());
+        CreateContext::encode_chain(
+            &[CreateContext {
+                name: CreateContext::NAME_MXAC.to_vec(),
+                data,
+            }],
+            &mut create_contexts,
+        )
+        .expect("encode maximal access context");
+    }
+
     // Allocate FileId, register Open.
     let tree = tree_arc.write().await;
     let file_id = tree.alloc_file_id();
@@ -245,11 +285,203 @@ pub async fn handle(
         file_attributes: info.attributes(),
         reserved2: 0,
         file_id,
-        create_contexts_offset: 0,
-        create_contexts_length: 0,
-        create_contexts: vec![],
+        create_contexts_offset: if create_contexts.is_empty() {
+            0
+        } else {
+            64 + 88
+        },
+        create_contexts_length: create_contexts.len() as u32,
+        create_contexts,
     };
     let mut buf = Vec::new();
     resp.write_to(&mut buf).expect("encode");
     HandlerResponse::ok(buf)
+}
+
+#[cfg(all(test, feature = "localfs"))]
+mod tests {
+    use super::*;
+    use crate::conn::state::Session;
+    use crate::proto::header::HeaderTail;
+    use crate::proto::messages::TreeConnectRequest;
+    use crate::{Identity, LocalFsBackend, Share, SmbServer};
+    use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn maximal_access_with_padded_contexts_respects_share_and_backend_permissions() {
+        for (access, backend_read_only) in [
+            (Access::ReadWrite, false),
+            (Access::Read, false),
+            (Access::ReadWrite, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(directory.path().join("x"), b"original").unwrap();
+            let mut backend = LocalFsBackend::new(directory.path()).unwrap();
+            if backend_read_only {
+                backend = backend.read_only();
+            }
+            let server = SmbServer::builder()
+                .listen("127.0.0.1:0".parse().unwrap())
+                .user("alice", "password")
+                .share(Share::new("home", backend).user("alice", access))
+                .build()
+                .unwrap();
+            let state = server.state();
+            let conn = Arc::new(Connection::new(state.config.server_guid, 65536, 65536));
+            conn.sessions.write().await.insert(
+                1,
+                Arc::new(RwLock::new(Session::new(
+                    1,
+                    Identity::User {
+                        user: "alice".into(),
+                        domain: String::new(),
+                    },
+                    [0; 16],
+                    [0; 16],
+                    false,
+                    None,
+                ))),
+            );
+            let mut hdr = Smb2Header {
+                session_id: 1,
+                ..Default::default()
+            };
+            let path: Vec<u8> = "\\\\server\\home"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            let mut body = Vec::new();
+            TreeConnectRequest {
+                structure_size: 9,
+                flags: 0,
+                path_offset: 72,
+                path_length: path.len() as u16,
+                path,
+            }
+            .write_to(&mut body)
+            .unwrap();
+            let response = super::super::tree_connect::handle(&state, &conn, &hdr, &body).await;
+            assert_eq!(response.status, ntstatus::STATUS_SUCCESS);
+            hdr.tail = HeaderTail::sync(response.override_tree_id.unwrap());
+            let writable = access.allows_write() && !backend_read_only;
+            let expected_access: u32 = if writable { 0x001F_01FF } else { 0x0012_00A9 };
+
+            for (name, options) in [("", FILE_DIRECTORY_FILE), ("x", FILE_NON_DIRECTORY_FILE)] {
+                // A metadata-only open must still return the user's full access.
+                for desired_access in [FILE_READ_ATTRIBUTES, MAX_ALLOWED, FILE_WRITE_DATA] {
+                    let name: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                    let context_offset = (56 + name.len() + 8) & !7;
+                    let mut body = vec![0u8; context_offset];
+                    body[0..2].copy_from_slice(&57u16.to_le_bytes());
+                    body[24..28].copy_from_slice(&desired_access.to_le_bytes());
+                    body[32..36].copy_from_slice(&7u32.to_le_bytes());
+                    body[36..40].copy_from_slice(&FILE_OPEN.to_le_bytes());
+                    body[40..44].copy_from_slice(&options.to_le_bytes());
+                    body[44..46].copy_from_slice(&120u16.to_le_bytes());
+                    body[46..48].copy_from_slice(&(name.len() as u16).to_le_bytes());
+                    body[48..52].copy_from_slice(&((context_offset + 64) as u32).to_le_bytes());
+                    body[56..56 + name.len()].copy_from_slice(&name);
+                    let mut contexts = Vec::new();
+                    CreateContext::encode_chain(
+                        &[
+                            CreateContext {
+                                name: b"QFid".to_vec(),
+                                data: vec![],
+                            },
+                            CreateContext {
+                                name: b"MxAc".to_vec(),
+                                data: vec![],
+                            },
+                        ],
+                        &mut contexts,
+                    )
+                    .unwrap();
+                    body[52..56].copy_from_slice(&(contexts.len() as u32).to_le_bytes());
+                    body.extend_from_slice(&contexts);
+                    let response = handle(&state, &conn, &hdr, &body).await;
+                    if desired_access == FILE_WRITE_DATA && !writable {
+                        assert_eq!(response.status, ntstatus::STATUS_ACCESS_DENIED);
+                        continue;
+                    }
+                    assert_eq!(response.status, ntstatus::STATUS_SUCCESS);
+                    let response = CreateResponse::parse(&response.body).unwrap();
+                    assert_eq!(response.create_contexts_offset, 152);
+                    assert_eq!(response.create_contexts_length, 32);
+                    let contexts = CreateContext::parse_chain(&response.create_contexts).unwrap();
+                    assert_eq!(contexts.len(), 1);
+                    assert_eq!(contexts[0].name, b"MxAc");
+                    assert_eq!(
+                        &contexts[0].data[..4],
+                        &ntstatus::STATUS_SUCCESS.to_le_bytes()
+                    );
+                    assert_eq!(&contexts[0].data[4..], &expected_access.to_le_bytes());
+
+                    // A timestamp matching ChangeTime must return NONE_MAPPED.
+                    let mut contexts = Vec::new();
+                    CreateContext::encode_chain(
+                        &[CreateContext {
+                            name: b"MxAc".to_vec(),
+                            data: response.change_time.to_le_bytes().to_vec(),
+                        }],
+                        &mut contexts,
+                    )
+                    .unwrap();
+                    body.truncate(context_offset);
+                    body[52..56].copy_from_slice(&(contexts.len() as u32).to_le_bytes());
+                    body.extend_from_slice(&contexts);
+                    let response = handle(&state, &conn, &hdr, &body).await;
+                    assert_eq!(response.status, ntstatus::STATUS_SUCCESS);
+                    let response = CreateResponse::parse(&response.body).unwrap();
+                    let contexts = CreateContext::parse_chain(&response.create_contexts).unwrap();
+                    assert_eq!(contexts[0].data, [0x73, 0, 0, 0xC0, 0, 0, 0, 0]);
+
+                    // No context requested: preserve the context-free response.
+                    body.truncate(56 + name.len());
+                    body[48..56].fill(0);
+                    let response = handle(&state, &conn, &hdr, &body).await;
+                    assert_eq!(response.status, ntstatus::STATUS_SUCCESS);
+                    let response = CreateResponse::parse(&response.body).unwrap();
+                    assert_eq!(response.create_contexts_offset, 0);
+                    assert_eq!(response.create_contexts_length, 0);
+                }
+            }
+            conn.close_session(1).await;
+            assert_eq!(
+                std::fs::read(directory.path().join("x")).unwrap(),
+                b"original"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_create_contexts_are_rejected_before_opening_files() {
+        let server = SmbServer::builder()
+            .listen("127.0.0.1:0".parse().unwrap())
+            .build()
+            .unwrap();
+        let state = server.state();
+        let conn = Arc::new(Connection::new(state.config.server_guid, 65536, 65536));
+        for data in [vec![0], vec![0; 7], vec![0; 9]] {
+            let mut body = vec![0u8; 56];
+            body[0..2].copy_from_slice(&57u16.to_le_bytes());
+            body[48..52].copy_from_slice(&120u32.to_le_bytes());
+            let mut contexts = Vec::new();
+            CreateContext::encode_chain(
+                &[CreateContext {
+                    name: b"MxAc".to_vec(),
+                    data,
+                }],
+                &mut contexts,
+            )
+            .unwrap();
+            body[52..56].copy_from_slice(&(contexts.len() as u32).to_le_bytes());
+            body.extend_from_slice(&contexts);
+            let response = handle(&state, &conn, &Smb2Header::default(), &body).await;
+            assert_eq!(response.status, ntstatus::STATUS_INVALID_PARAMETER);
+            body.truncate(body.len() - 1);
+            assert!(CreateRequest::parse(&body).is_err());
+            body[48..52].copy_from_slice(&64u32.to_le_bytes());
+            assert!(CreateRequest::parse(&body).is_err());
+        }
+    }
 }
