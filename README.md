@@ -12,7 +12,7 @@
 * Create users and give them read-only or read/write access to each folder.
 * Browse your filesystem and choose which protocols each folder uses.
 * Configure ports and see whether services are online, unused, or have a port conflict.
-* Inspect file protocol activity in **Debug → Logs**, including users, paths, client IPs, and results.
+* Inspect file protocol activity with logs, including users, paths, client IPs, and results.
 
 > 💡 All four protocols run in the same Node.js process. Transfarr manages its own users; it does not create Linux accounts or run separate file-sharing daemons.
 
