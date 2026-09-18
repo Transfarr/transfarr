@@ -20,6 +20,7 @@ use crate::utils::utf16le_to_units;
 const FILE_READ_DATA: u32 = 0x0000_0001;
 const FILE_WRITE_DATA: u32 = 0x0000_0002;
 const FILE_APPEND_DATA: u32 = 0x0000_0004;
+const FILE_WRITE_EA: u32 = 0x0000_0010;
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
 const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
 const DELETE: u32 = 0x0001_0000;
@@ -163,6 +164,7 @@ pub async fn handle(
     let want_write = req.desired_access
         & (FILE_WRITE_DATA
             | FILE_APPEND_DATA
+            | FILE_WRITE_EA
             | FILE_WRITE_ATTRIBUTES
             | DELETE
             | GENERIC_WRITE
@@ -194,6 +196,9 @@ pub async fn handle(
         return HandlerResponse::err(ntstatus::STATUS_INVALID_PARAMETER);
     }
     let delete_on_close = req.create_options & FILE_DELETE_ON_CLOSE != 0;
+    if delete_on_close && (!granted.allows_write() || !want_write) {
+        return HandlerResponse::err(ntstatus::STATUS_ACCESS_DENIED);
+    }
 
     let opts = OpenOptions {
         read: want_read || !want_write,

@@ -26,6 +26,7 @@ use bytes::Bytes;
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use tokio::task::spawn_blocking;
+use xattr::FileExt as _;
 
 use crate::backend::{
     BackendCapabilities, DirEntry as SmbDirEntry, FileInfo, FileTimes, Handle, OpenIntent,
@@ -44,6 +45,7 @@ use crate::path::SmbPath;
 pub struct LocalFsBackend {
     root: Arc<Dir>,
     read_only: bool,
+    named_streams: bool,
 }
 
 impl LocalFsBackend {
@@ -51,9 +53,13 @@ impl LocalFsBackend {
     /// not a directory.
     pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
         let dir = Dir::open_ambient_dir(path, ambient_authority())?;
+        // cap-std directory handles use O_PATH on Linux, which cannot perform
+        // xattr syscalls. Open a readable descriptor within the same capability.
+        let named_streams = dir.open(".")?.into_std().list_xattr().is_ok();
         Ok(Self {
             root: Arc::new(dir),
             read_only: false,
+            named_streams,
         })
     }
 
@@ -77,7 +83,7 @@ impl LocalFsBackend {
 /// separators), so this is purely a join. The empty `SmbPath` (root) yields
 /// `PathBuf::from(".")` — cap-std accepts this for `metadata` etc.
 fn to_rel_path(path: &SmbPath) -> PathBuf {
-    if path.is_root() {
+    if path.components().is_empty() {
         return PathBuf::from(".");
     }
     let mut out = PathBuf::new();
@@ -91,7 +97,7 @@ fn to_rel_path(path: &SmbPath) -> PathBuf {
 // Error mapping
 // ---------------------------------------------------------------------------
 
-fn io_to_smb(err: io::Error) -> SmbError {
+pub(super) fn io_to_smb(err: io::Error) -> SmbError {
     use io::ErrorKind::*;
     match err.kind() {
         NotFound => SmbError::NotFound,
@@ -127,7 +133,7 @@ fn system_time_to_filetime(t: SystemTime) -> u64 {
     }
 }
 
-fn filetime_to_system_time(ft: u64) -> Option<SystemTime> {
+pub(super) fn filetime_to_system_time(ft: u64) -> Option<SystemTime> {
     if ft < FILETIME_OFFSET {
         return None;
     }
@@ -141,7 +147,7 @@ fn filetime_to_system_time(ft: u64) -> Option<SystemTime> {
 // FileInfo construction
 // ---------------------------------------------------------------------------
 
-fn file_info_from_metadata(name: String, md: &cap_std::fs::Metadata) -> FileInfo {
+pub(super) fn file_info_from_metadata(name: String, md: &cap_std::fs::Metadata) -> FileInfo {
     let len = md.len();
     let modified = md.modified().ok().map(|t| t.into_std());
     let accessed = md.accessed().ok().map(|t| t.into_std());
@@ -229,6 +235,7 @@ impl ShareBackend for LocalFsBackend {
         //    truncation, or overwrite is rejected up front. Pure read opens
         //    pass through.
         let writes = opts.write
+            || opts.delete_on_close
             || matches!(
                 opts.intent,
                 OpenIntent::Create
@@ -238,6 +245,79 @@ impl ShareBackend for LocalFsBackend {
             );
         if self.read_only && writes {
             return Err(SmbError::AccessDenied);
+        }
+
+        if let Some(stream) = path.stream() {
+            if !self.named_streams {
+                return Err(SmbError::NotSupported);
+            }
+            if opts.directory {
+                return Err(SmbError::NotADirectory);
+            }
+            let root = Arc::clone(&self.root);
+            let rel = to_rel_path(path);
+            let stream = stream.to_string();
+            let name = path.display_backslash();
+            return spawn_blocking(move || -> SmbResult<Box<dyn Handle>> {
+                // Open the base object through cap-std first. Streams never
+                // become host paths, and creating a stream never truncates its base.
+                let _guard = super::streams::STREAM_LOCK.lock().unwrap();
+                let mut base_opts = CapOpenOptions::new();
+                base_opts.read(true);
+                let base = match root.open_with(&rel, &base_opts) {
+                    Ok(file) => file.into_std(),
+                    Err(e)
+                        if e.kind() == io::ErrorKind::NotFound
+                            && matches!(
+                                opts.intent,
+                                OpenIntent::Create
+                                    | OpenIntent::OpenOrCreate
+                                    | OpenIntent::OverwriteOrCreate
+                            ) =>
+                    {
+                        base_opts.write(true).create_new(true);
+                        root.open_with(&rel, &base_opts)
+                            .map_err(io_to_smb)?
+                            .into_std()
+                    }
+                    Err(e) => return Err(io_to_smb(e)),
+                };
+                let wanted = format!("user.DosStream.{stream}:$DATA");
+                let attribute = base
+                    .list_xattr()
+                    .map_err(io_to_smb)?
+                    .find(|key| {
+                        key.to_str()
+                            .is_some_and(|key| key.eq_ignore_ascii_case(&wanted))
+                    })
+                    .unwrap_or_else(|| wanted.into());
+                let existing = base.get_xattr(&attribute).map_err(io_to_smb)?;
+                match (opts.intent, existing.is_some()) {
+                    (OpenIntent::Open | OpenIntent::Truncate, false) => {
+                        return Err(SmbError::NotFound);
+                    }
+                    (OpenIntent::Create, true) => return Err(SmbError::Exists),
+                    (
+                        OpenIntent::Create
+                        | OpenIntent::OpenOrCreate
+                        | OpenIntent::OverwriteOrCreate,
+                        false,
+                    )
+                    | (OpenIntent::Truncate | OpenIntent::OverwriteOrCreate, true) => {
+                        base.set_xattr(&attribute, &[0]).map_err(io_to_smb)?;
+                    }
+                    _ => {}
+                }
+                Ok(Box::new(super::streams::StreamHandle {
+                    base: Arc::new(base),
+                    attribute,
+                    name,
+                    writable: opts.write,
+                }))
+            })
+            .await
+            .map_err(join_to_io)
+            .map_err(io_to_smb)?;
         }
 
         let rel = to_rel_path(path);
@@ -369,6 +449,27 @@ impl ShareBackend for LocalFsBackend {
         if self.read_only {
             return Err(SmbError::AccessDenied);
         }
+        if let Some(stream) = path.stream() {
+            let root = Arc::clone(&self.root);
+            let rel = to_rel_path(path);
+            let wanted = format!("user.DosStream.{stream}:$DATA");
+            return spawn_blocking(move || -> SmbResult<()> {
+                let _guard = super::streams::STREAM_LOCK.lock().unwrap();
+                let base = root.open(&rel).map_err(io_to_smb)?.into_std();
+                let attribute = base
+                    .list_xattr()
+                    .map_err(io_to_smb)?
+                    .find(|key| {
+                        key.to_str()
+                            .is_some_and(|key| key.eq_ignore_ascii_case(&wanted))
+                    })
+                    .ok_or(SmbError::NotFound)?;
+                base.remove_xattr(attribute).map_err(io_to_smb)
+            })
+            .await
+            .map_err(join_to_io)
+            .map_err(io_to_smb)?;
+        }
         if path.is_root() {
             // Refusing to delete the share root itself.
             return Err(SmbError::AccessDenied);
@@ -398,6 +499,11 @@ impl ShareBackend for LocalFsBackend {
         if self.read_only {
             return Err(SmbError::AccessDenied);
         }
+        // Renaming the base file carries its xattrs with it. A stream rename
+        // must never accidentally rename the base object.
+        if from.stream().is_some() || to.stream().is_some() {
+            return Err(SmbError::NotSupported);
+        }
         if from.is_root() || to.is_root() {
             return Err(SmbError::NameInvalid);
         }
@@ -426,6 +532,7 @@ impl ShareBackend for LocalFsBackend {
             // POSIX filesystems are typically case-sensitive. We don't try to
             // emulate case-insensitive lookup in v1 (see spec §3.4).
             case_sensitive: cfg!(any(target_os = "linux", target_os = "freebsd")),
+            named_streams: self.named_streams,
         }
     }
 }
@@ -584,6 +691,50 @@ impl Handle for LocalHandle {
             // stable API; mark as unsupported on directories.
             LocalHandle::Dir { .. } => Err(SmbError::NotSupported),
         }
+    }
+
+    async fn list_streams(&self) -> SmbResult<Vec<(String, u64)>> {
+        let base = match self {
+            LocalHandle::File { file, .. } => Arc::clone(file),
+            LocalHandle::Dir { dir_handle, .. } => {
+                Arc::new(dir_handle.open(".").map_err(io_to_smb)?.into_std())
+            }
+        };
+        spawn_blocking(move || -> SmbResult<Vec<(String, u64)>> {
+            let _guard = super::streams::STREAM_LOCK.lock().unwrap();
+            let md = base.metadata().map_err(io_to_smb)?;
+            let mut streams = if md.is_dir() {
+                vec![]
+            } else {
+                vec![("::$DATA".into(), md.len())]
+            };
+            let attributes = match base.list_xattr() {
+                Ok(attributes) => attributes,
+                Err(e) if e.kind() == io::ErrorKind::Unsupported => return Ok(streams),
+                Err(e) => return Err(io_to_smb(e)),
+            };
+            for attribute in attributes {
+                let Some(name) = attribute
+                    .to_str()
+                    .and_then(|key| key.strip_prefix("user.DosStream."))
+                else {
+                    continue;
+                };
+                if !name.ends_with(":$DATA") {
+                    continue;
+                }
+                if let Some(data) = base.get_xattr(&attribute).map_err(io_to_smb)? {
+                    // Samba's short-stream xattr representation ends with a NUL.
+                    if data.last() == Some(&0) {
+                        streams.push((format!(":{name}"), (data.len() - 1) as u64));
+                    }
+                }
+            }
+            Ok(streams)
+        })
+        .await
+        .map_err(join_to_io)
+        .map_err(io_to_smb)?
     }
 
     async fn truncate(&self, len: u64) -> SmbResult<()> {

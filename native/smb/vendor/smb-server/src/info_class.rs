@@ -173,18 +173,25 @@ pub fn encode_file_network_open_information(info: &FileInfo) -> Vec<u8> {
 // stream entry (`::$DATA`); for directories, empty buffer.
 // ---------------------------------------------------------------------------
 
-pub fn encode_file_stream_information(info: &FileInfo) -> Vec<u8> {
-    if info.is_directory {
-        return Vec::new();
-    }
-    let stream_name = utf16le("::$DATA");
-    let stream_name_len = stream_name.len() as u32;
+pub fn encode_file_stream_information(streams: &[(String, u64)]) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(&0u32.to_le_bytes()); // NextEntryOffset = 0
-    out.extend_from_slice(&stream_name_len.to_le_bytes()); // StreamNameLength
-    out.extend_from_slice(&info.end_of_file.to_le_bytes()); // StreamSize
-    out.extend_from_slice(&info.allocation_size.to_le_bytes()); // StreamAllocationSize
-    out.extend_from_slice(&stream_name);
+    for (index, (name, size)) in streams.iter().enumerate() {
+        let name = utf16le(name);
+        let start = out.len();
+        let next = if index + 1 < streams.len() {
+            align8(24 + name.len()) as u32
+        } else {
+            0
+        };
+        out.extend_from_slice(&next.to_le_bytes());
+        out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&name);
+        if next != 0 {
+            out.resize(start + next as usize, 0);
+        }
+    }
     out
 }
 

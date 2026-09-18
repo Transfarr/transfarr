@@ -23,6 +23,7 @@ const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
 const FILE_FILE_COMPRESSION: u32 = 0x0000_0010;
 const FILE_SUPPORTS_HARD_LINKS: u32 = 0x0040_0000;
 const FILE_SUPPORTS_EXTENDED_ATTRIBUTES: u32 = 0x0080_0000;
+const FILE_NAMED_STREAMS: u32 = 0x0004_0000;
 
 pub async fn handle(
     _server: &Arc<ServerState>,
@@ -83,7 +84,16 @@ pub async fn handle(
                 ic::FILE_NETWORK_OPEN_INFORMATION => {
                     ic::encode_file_network_open_information(&info)
                 }
-                ic::FILE_STREAM_INFORMATION => ic::encode_file_stream_information(&info),
+                ic::FILE_STREAM_INFORMATION => {
+                    let open = open_arc.read().await;
+                    let Some(handle) = open.handle.as_ref() else {
+                        return HandlerResponse::err(ntstatus::STATUS_FILE_CLOSED);
+                    };
+                    match handle.list_streams().await {
+                        Ok(streams) => ic::encode_file_stream_information(&streams),
+                        Err(e) => return HandlerResponse::err(e.to_nt_status()),
+                    }
+                }
                 _ => return HandlerResponse::err(ntstatus::STATUS_INVALID_INFO_CLASS),
             }
         }
@@ -113,7 +123,19 @@ pub async fn handle(
                         | FILE_PERSISTENT_ACLS
                         | FILE_FILE_COMPRESSION
                         | FILE_SUPPORTS_HARD_LINKS
-                        | FILE_SUPPORTS_EXTENDED_ATTRIBUTES,
+                        | FILE_SUPPORTS_EXTENDED_ATTRIBUTES
+                        | if tree_arc
+                            .read()
+                            .await
+                            .share
+                            .backend
+                            .capabilities()
+                            .named_streams
+                        {
+                            FILE_NAMED_STREAMS
+                        } else {
+                            0
+                        },
                     255,
                     "NTFS",
                 ),

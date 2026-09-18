@@ -146,6 +146,8 @@ pub struct BackendCapabilities {
     pub is_read_only: bool,
     /// True iff the backend treats names case-sensitively.
     pub case_sensitive: bool,
+    /// The backing filesystem can persist named $DATA streams.
+    pub named_streams: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +199,16 @@ pub trait Handle: Send + Sync {
     /// Stat: current file info.
     async fn stat(&self) -> SmbResult<FileInfo>;
 
+    /// Stream names in wire format (":name:$DATA") and byte lengths.
+    async fn list_streams(&self) -> SmbResult<Vec<(String, u64)>> {
+        let info = self.stat().await?;
+        Ok(if info.is_directory {
+            vec![]
+        } else {
+            vec![("::$DATA".into(), info.end_of_file)]
+        })
+    }
+
     /// Set timestamps. `None` fields leave the corresponding field alone.
     async fn set_times(&self, times: FileTimes) -> SmbResult<()>;
 
@@ -233,6 +245,7 @@ impl ShareBackend for NotSupportedBackend {
         BackendCapabilities {
             is_read_only: true,
             case_sensitive: false,
+            named_streams: false,
         }
     }
 }

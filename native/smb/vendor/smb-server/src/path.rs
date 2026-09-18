@@ -10,11 +10,13 @@ use std::str::FromStr;
 use crate::error::{SmbError, SmbResult};
 
 /// A validated, component-list path. No `..`, no Windows-forbidden chars, no
-/// alternate streams. Always relative to the share root — the empty path is
+/// traversal. A named $DATA stream is stored separately from filesystem components.
+/// Always relative to the share root — the empty path is
 /// the root.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SmbPath {
     components: Vec<String>,
+    stream: Option<String>,
 }
 
 impl SmbPath {
@@ -43,6 +45,32 @@ impl SmbPath {
             return Ok(Self::root());
         }
 
+        let (trimmed, stream) = match trimmed.split_once(':') {
+            Some((base, suffix)) => {
+                let (name, kind) = suffix.split_once(':').unwrap_or((suffix, "$DATA"));
+                if !kind.eq_ignore_ascii_case("$DATA")
+                    || name
+                        .chars()
+                        .any(|c| c.is_control() || "\\/<>:\"|?*".contains(c))
+                    || name == "."
+                    || name == ".."
+                    || (name.is_empty() && suffix != ":$DATA")
+                    || name.len() > 230
+                {
+                    return Err(SmbError::NameInvalid);
+                }
+                (
+                    base,
+                    if name.is_empty() {
+                        None
+                    } else {
+                        Some(name.to_string())
+                    },
+                )
+            }
+            None => (trimmed, None),
+        };
+
         // 2. Reject forbidden characters anywhere in the path.
         for ch in trimmed.chars() {
             if ch == '\0' || ('\u{0001}'..='\u{001F}').contains(&ch) {
@@ -58,7 +86,7 @@ impl SmbPath {
 
         // 3. Split on `\` or `/`; reject `..` and empty components; skip `.`.
         let mut components = Vec::new();
-        for raw in trimmed.split(['\\', '/']) {
+        for raw in trimmed.split(['\\', '/']).filter(|_| !trimmed.is_empty()) {
             if raw.is_empty() {
                 // Doubled separator like `foo\\bar` — reject.
                 return Err(SmbError::NameInvalid);
@@ -75,7 +103,7 @@ impl SmbPath {
             }
             components.push(raw.to_string());
         }
-        Ok(Self { components })
+        Ok(Self { components, stream })
     }
 
     /// Path components in order. Empty for the root.
@@ -85,7 +113,11 @@ impl SmbPath {
 
     /// Is this the share root?
     pub fn is_root(&self) -> bool {
-        self.components.is_empty()
+        self.components.is_empty() && self.stream.is_none()
+    }
+
+    pub fn stream(&self) -> Option<&str> {
+        self.stream.as_deref()
     }
 
     /// Return the parent path, or `None` if this is the root.
@@ -95,7 +127,10 @@ impl SmbPath {
         }
         let mut parent = self.components.clone();
         parent.pop();
-        Some(SmbPath { components: parent })
+        Some(SmbPath {
+            components: parent,
+            stream: None,
+        })
     }
 
     /// Return the last component, if any.
@@ -105,17 +140,25 @@ impl SmbPath {
 
     /// Append a single, already-validated last component to this path.
     pub fn join(&self, last: &str) -> SmbResult<SmbPath> {
+        if self.stream.is_some() {
+            return Err(SmbError::NameInvalid);
+        }
         // Run `last` through the same validator (treating it as a single-
         // component path).
         let extra = last.parse::<SmbPath>()?;
         let mut out = self.clone();
         out.components.extend(extra.components);
+        out.stream = extra.stream;
         Ok(out)
     }
 
     /// Render as a backslash-separated string. Empty for root.
     pub fn display_backslash(&self) -> String {
-        self.components.join("\\")
+        let mut path = self.components.join("\\");
+        if let Some(stream) = &self.stream {
+            path.push_str(&format!(":{stream}:$DATA"));
+        }
+        path
     }
 }
 
@@ -235,7 +278,7 @@ mod tests {
 
     #[test]
     fn rejects_forbidden_chars() {
-        for bad in ["a<b", "a>b", "a:b", "a\"b", "a|b", "a?b", "a*b"] {
+        for bad in ["a<b", "a>b", "a:b:c", "a\"b", "a|b", "a?b", "a*b"] {
             assert!(bad.parse::<SmbPath>().is_err(), "{bad}");
         }
     }
@@ -276,5 +319,41 @@ mod tests {
     fn round_trip_via_utf16() {
         let p = SmbPath::from_utf16(&utf16("a\\b")).unwrap();
         assert_eq!(p.components(), &["a", "b"]);
+    }
+
+    #[test]
+    fn named_streams_are_separate_from_confined_base_paths() {
+        let p: SmbPath = "dir\\file:com.apple.lastuseddate#PS:$DATA".parse().unwrap();
+        assert_eq!(p.components(), &["dir", "file"]);
+        assert_eq!(p.stream(), Some("com.apple.lastuseddate#PS"));
+        assert_eq!(
+            p.display_backslash(),
+            "dir\\file:com.apple.lastuseddate#PS:$DATA"
+        );
+        assert_eq!("file::$DATA".parse::<SmbPath>().unwrap().stream(), None);
+        assert_eq!(
+            "file:meta".parse::<SmbPath>().unwrap().stream(),
+            Some("meta")
+        );
+        assert!(
+            ":meta:$DATA"
+                .parse::<SmbPath>()
+                .unwrap()
+                .components()
+                .is_empty()
+        );
+        for bad in [
+            "../file:meta",
+            "dir:meta/file",
+            "file:../meta",
+            "file:..",
+            "file:",
+            "file:meta:$INDEX_ALLOCATION",
+            "file:meta:$DATA:extra",
+            "CON:meta",
+            "file:meta\0",
+        ] {
+            assert!(bad.parse::<SmbPath>().is_err(), "{bad}");
+        }
     }
 }

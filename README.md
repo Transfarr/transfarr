@@ -118,6 +118,8 @@ File-sharing clients authenticate with the usernames and passwords created on th
 
 FTP, FTPS, and SFTP show a root directory containing the user's permitted shares. SMB lets users select a share or connect directly to `smb://<host>/<ShareName>`.
 
+For Apple Files compatibility, SMB supports small named metadata streams using filesystem extended attributes, like Samba's `streams_xattr`. The shared filesystem must support xattrs. Metadata follows file renames and deletion; backups should preserve xattrs. Each stream is limited to 65,535 bytes and the filesystem's own xattr limits. Individual stream renames are not supported.
+
 Change ports under **Settings → SMB / FTP / FTPS / SFTP**. Leave the port field empty to use its default. If a change would disconnect connected clients, Transfarr asks for confirmation before saving. Cancelling keeps the current settings and connections. FTP and FTPS also have **Passive port start** and **Passive port end** fields. Each range is saved independently, checked for overlaps and occupied ports, and must be allowed through your firewall. Saved ranges take precedence over `TRANSFARR_PASSIVE_MIN`, which sets the initial FTP start and places the initial FTPS range ten ports later.
 
 The sidebar shows **green** when a service is online, **grey** when no folders use it, and **red** for a conflict or service error. Services start when a folder enables them and stop when the last folder disables them.

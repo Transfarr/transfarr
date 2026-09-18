@@ -41,6 +41,11 @@ pub async fn handle(
         Some(o) => o,
         None => return HandlerResponse::err(ntstatus::STATUS_FILE_CLOSED),
     };
+    if !tree_arc.read().await.granted_access.allows_write()
+        || !open_arc.read().await.granted_access.allows_write()
+    {
+        return HandlerResponse::err(ntstatus::STATUS_ACCESS_DENIED);
+    }
 
     let class = req.file_information_class;
     let buffer = req.buffer;

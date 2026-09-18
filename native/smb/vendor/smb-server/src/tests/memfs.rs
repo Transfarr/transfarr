@@ -138,6 +138,7 @@ impl ShareBackend for MemFsBackend {
 
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
+            named_streams: false,
             is_read_only: false,
             case_sensitive: false,
         }
