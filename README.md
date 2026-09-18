@@ -162,12 +162,4 @@ All protocols use the process UID/GID. With the default umask of `0022`, new fil
 
 Editing users or shares disconnects active transfers so permission changes take effect. Clients can reconnect with their updated access. Removing a share from Transfarr does **not** delete its files. Folders without enabled protocols or any access grants are inaccessible.
 
-**What should I back up?**
-
-Back up both `./volumes/data` and `./volumes/mnt`. Stop Transfarr before taking a consistent backup or restoring these directories, and preserve their ownership and permissions.
-
-Users, folders, permissions, and protocol settings are stored in `sqlite/db.sqlite` inside the data directory, using Sequelize as in Containarr. SQLite uses WAL journaling and transactional writes. Stop Transfarr before copying the data directory so the database and any WAL files form a consistent backup. Existing `transfarr.json` files are ignored; no data is migrated or imported.
-
-Protect the entire data directory. Password verification uses scrypt; sharing passwords are additionally encrypted with AES-256-GCM for SMB authentication. Anyone with both the database and `secret.key` can recover sharing passwords. Sharing passwords are never returned by the API.
-
 See [CHANGELOG.md](./CHANGELOG.md) for changes.
