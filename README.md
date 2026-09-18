@@ -26,14 +26,6 @@
 
 [View more screenshots »](./screenshots)
 
-# Requirements
-
-* Docker Engine with host networking (Docker Compose is optional).
-* A directory containing the files you want to share, writable by the container's configured UID/GID.
-* Port **3000** for the web interface, plus an available port for each sharing protocol you enable.
-
-Linux supports Docker host networking directly. On [Docker Desktop](https://docs.docker.com/engine/network/drivers/host/), enable its host-networking feature. [OrbStack](https://docs.orbstack.dev/docker/network#host-networking) also supports host networking. For a native macOS run, see [Development](#development).
-
 # Getting Started
 
 The recommended way to install Transfarr is using [Containarr](https://containarr.com), created by the same author. To install it directly with Docker, follow the steps below.
