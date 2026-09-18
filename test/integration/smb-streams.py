@@ -5,7 +5,7 @@ import sys
 from impacket.smbconnection import SMBConnection, SessionError
 from impacket.smb3 import SessionError as SMB3SessionError
 from impacket.smb3structs import (
-    FILE_READ_DATA, FILE_READ_ATTRIBUTES,
+    FILE_READ_DATA, FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES,
     FILE_OPEN, FILE_DIRECTORY_FILE, SMB2_0_INFO_FILESYSTEM,
 )
 
@@ -23,6 +23,21 @@ client.closeFile(tree, root)
 metadata = b'ios-metadata\x00\x01\x02'
 
 if phase == 'write':
+    client.createDirectory('Files', 'folder')
+    # Apple clients can set folder metadata immediately after creating it.
+    # This previously returned STATUS_NOT_SUPPORTED (OSStatus -1426).
+    for directory in ['folder', '']:
+        file_id = client.openFile(tree, directory, desiredAccess=FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                                  creationOption=FILE_DIRECTORY_FILE, creationDisposition=FILE_OPEN)
+        access_time, write_time = 133500000000000000, 133500100000000000
+        smb.setInfo(tree, file_id, inputBlob=struct.pack('<QQQQII', 0, access_time, write_time, 0, 0x10, 0), fileInfoClass=4)
+        basic = smb.queryInfo(tree, file_id, fileInfoClass=4)
+        assert struct.unpack_from('<QQ', basic, 8) == (access_time, write_time)
+        # Zero and -1 timestamps mean leave the current timestamps unchanged.
+        smb.setInfo(tree, file_id, inputBlob=struct.pack('<QQQQII', 0, 0, 2**64 - 1, 0, 0x10, 0), fileInfoClass=4)
+        basic = smb.queryInfo(tree, file_id, fileInfoClass=4)
+        assert struct.unpack_from('<QQ', basic, 8) == (access_time, write_time)
+        client.closeFile(tree, file_id)
     for base in ['base.txt', 'folder', '']:
         stream = base + ':com.apple.lastuseddate#PS:$DATA'
         client.putFile('Files', stream, io.BytesIO(metadata).read)
@@ -64,15 +79,20 @@ reader_tree = reader.connectTree('Files')
 received = bytearray()
 reader.getFile('Files', 'renamed.txt:com.apple.lastuseddate#PS', received.extend)
 assert received == metadata
-for operation in ['write', 'delete', 'delete_on_read_handle']:
+for operation in ['write', 'delete', 'delete_on_read_handle', 'directory_times']:
     try:
         if operation == 'write':
             reader.putFile('Files', 'renamed.txt:com.apple.lastuseddate#PS', io.BytesIO(b'no').read)
         elif operation == 'delete':
             reader.deleteFile('Files', 'renamed.txt:com.apple.lastuseddate#PS')
-        else:
+        elif operation == 'delete_on_read_handle':
             file_id = reader.openFile(reader_tree, 'renamed.txt:com.apple.lastuseddate#PS', desiredAccess=FILE_READ_DATA, creationDisposition=FILE_OPEN)
             reader.getSMBServer().setInfo(reader_tree, file_id, inputBlob=b'\x01', fileInfoClass=13)
+        else:
+            file_id = reader.openFile(reader_tree, 'folder', desiredAccess=FILE_READ_ATTRIBUTES,
+                                      creationOption=FILE_DIRECTORY_FILE, creationDisposition=FILE_OPEN)
+            reader.getSMBServer().setInfo(reader_tree, file_id,
+                inputBlob=struct.pack('<QQQQII', 0, 133500000000000000, 133500000000000000, 0, 0x10, 0), fileInfoClass=4)
         raise AssertionError('Read-only stream mutation succeeded: ' + operation)
     except (SessionError, SMB3SessionError) as error:
         status = error.getErrorCode() if isinstance(error, SessionError) else error.get_error_code()

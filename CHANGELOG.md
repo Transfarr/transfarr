@@ -1,5 +1,6 @@
 # Next
 
+* Fixed SMB directory timestamp updates returning “operation not supported,” including metadata updates after creating folders in Apple clients.
 * Added persistent SMB named metadata streams (the equivalent of Samba's `streams_xattr`) for iOS Files compatibility, including stream enumeration and read-only access enforcement.
 * Fixed SMB maximal-access replies and padded CREATE requests for Apple client permission checks, while preserving read-only share restrictions.
 * Fixed the SMB discovery integration test fixture to support activity logging and verify log draining during shutdown.

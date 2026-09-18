@@ -359,6 +359,7 @@ impl ShareBackend for LocalFsBackend {
             return Ok(Box::new(LocalHandle::Dir {
                 name: file_name_for(path),
                 dir_handle: Arc::new(dir_handle),
+                read_only,
             }));
         }
 
@@ -393,6 +394,7 @@ impl ShareBackend for LocalFsBackend {
                     return Ok(Box::new(LocalHandle::Dir {
                         name: file_name_for(path),
                         dir_handle: Arc::new(dir_handle),
+                        read_only,
                     }));
                 }
                 OpenIntent::Create => return Err(SmbError::Exists),
@@ -553,6 +555,7 @@ enum LocalHandle {
     Dir {
         name: String,
         dir_handle: Arc<Dir>,
+        read_only: bool,
     },
 }
 
@@ -687,9 +690,37 @@ impl Handle for LocalHandle {
                 .map_err(io_to_smb)?
                 .map_err(io_to_smb)
             }
-            // cap-std's directory handle does not expose set_times in its
-            // stable API; mark as unsupported on directories.
-            LocalHandle::Dir { .. } => Err(SmbError::NotSupported),
+            LocalHandle::Dir {
+                dir_handle,
+                read_only,
+                ..
+            } => {
+                if *read_only {
+                    return Err(SmbError::AccessDenied);
+                }
+                let dir_handle = Arc::clone(dir_handle);
+                spawn_blocking(move || -> io::Result<()> {
+                    // Reopen within the directory capability: Linux's O_PATH
+                    // directory descriptor cannot be used with set_times.
+                    let file = dir_handle.open(".")?.into_std();
+                    let mut std_times = std::fs::FileTimes::new();
+                    if let Some(ft) = times.last_write_time
+                        && let Some(t) = filetime_to_system_time(ft)
+                    {
+                        std_times = std_times.set_modified(t);
+                    }
+                    if let Some(ft) = times.last_access_time
+                        && let Some(t) = filetime_to_system_time(ft)
+                    {
+                        std_times = std_times.set_accessed(t);
+                    }
+                    file.set_times(std_times)
+                })
+                .await
+                .map_err(join_to_io)
+                .map_err(io_to_smb)?
+                .map_err(io_to_smb)
+            }
         }
     }
 
@@ -1068,5 +1099,47 @@ mod tests {
             .unwrap();
         // 100ns granularity — round-trip should be sub-microsecond.
         assert!(delta < Duration::from_micros(1), "delta = {delta:?}");
+    }
+
+    #[tokio::test]
+    async fn directory_timestamps_support_both_open_paths_and_read_only_backends() {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::create_dir(td.path().join("folder")).unwrap();
+        let backend = LocalFsBackend::new(td.path()).unwrap();
+        let access = FILETIME_OFFSET + 1_700_000_000 * 10_000_000;
+        let write = access + 60 * 10_000_000;
+        for name in ["", "folder"] {
+            for directory in [true, false] {
+                let path: SmbPath = name.parse().unwrap();
+                let opts = OpenOptions {
+                    directory,
+                    ..Default::default()
+                };
+                let handle = backend.open(&path, opts).await.unwrap();
+                handle
+                    .set_times(FileTimes {
+                        last_access_time: Some(access),
+                        last_write_time: Some(write),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                let info = handle.stat().await.unwrap();
+                assert_eq!(info.last_access_time, access);
+                assert_eq!(info.last_write_time, write);
+                handle.set_times(FileTimes::default()).await.unwrap();
+                assert_eq!(handle.stat().await.unwrap().last_write_time, write);
+                handle.close().await.unwrap();
+
+                let read_only = LocalFsBackend::new(td.path()).unwrap().read_only();
+                let handle = read_only.open(&path, opts).await.unwrap();
+                assert!(matches!(
+                    handle.set_times(FileTimes::all(SystemTime::now())).await,
+                    Err(SmbError::AccessDenied)
+                ));
+                assert_eq!(handle.stat().await.unwrap().last_write_time, write);
+                handle.close().await.unwrap();
+            }
+        }
     }
 }

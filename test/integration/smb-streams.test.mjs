@@ -19,7 +19,6 @@ test("SMB metadata streams advertise support, persist, and enforce permissions",
     await fs.rm(outside, { recursive: true, force: true });
   });
   await fs.writeFile(path.join(directory, "base.txt"), "original");
-  await fs.mkdir(path.join(directory, "folder"));
   await fs.writeFile(path.join(outside, "secret.txt"), "untouched");
   await fs.symlink(outside, path.join(directory, "escape"));
   const probe = net.createServer();
