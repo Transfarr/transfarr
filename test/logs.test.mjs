@@ -6,6 +6,57 @@ import path from "node:path";
 import { Store } from "../lib/store.mjs";
 import { createApp } from "../lib/http.mjs";
 
+test("clearing logs removes stored and buffered activity, persists, and allows new activity", async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "transfarr-clear-logs-"));
+  let store = new Store(path.join(directory, "data"));
+  await store.ready;
+  t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
+  const app = createApp(store, { status: {} }, { root: directory, publicDir: directory });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise(resolve => server.once("listening", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const url = `http://127.0.0.1:${server.address().port}/api/v1/logs`;
+  store.audit({ protocol: "ftp", action: "Upload", outcome: "success" });
+  await store.flushAudit();
+  assert.equal((await fetch(url, { method: "DELETE" })).status, 403);
+  assert.equal(await store.AuditLog.count(), 1);
+  store.audit({ protocol: "sftp", action: "Login", outcome: "failure" });
+  const response = await fetch(`${url}?protocol=ftp`, { method: "DELETE", headers: { "X-Transfarr-Request": "1" } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true });
+  const cleared = await (await fetch(url)).json();
+  assert.deepEqual(cleared.entries, []);
+  assert.equal(cleared.nextCursor, null);
+  assert.equal((await fetch(url, { method: "DELETE", headers: { "X-Transfarr-Request": "1" } })).status, 200);
+  await store.close();
+  store = new Store(path.join(directory, "data"));
+  await store.ready;
+  assert.equal(await store.AuditLog.count(), 0);
+  store.audit({ protocol: "smb", action: "Login", outcome: "success" });
+  await store.flushAudit();
+  assert.equal(await store.AuditLog.count(), 1);
+});
+
+test("clearing logs runs after pending writes and before new writes, and propagates deletion failures", async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "transfarr-clear-queue-"));
+  const store = new Store(directory);
+  await store.ready;
+  t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
+  store.audit({ protocol: "ftp", action: "Old activity", outcome: "success" });
+  const pending = store.flushAudit();
+  store.audit({ protocol: "sftp", action: "Buffered activity", outcome: "success" });
+  const cleared = store.clearAudit();
+  store.audit({ protocol: "smb", action: "New activity", outcome: "success" });
+  await Promise.all([pending, cleared, store.flushAudit()]);
+  assert.deepEqual((await store.AuditLog.findAll()).map(row => row.action), ["New activity"]);
+  const deletion = t.mock.method(store.AuditLog, "destroy", async () => { throw new Error("Delete failed"); });
+  await assert.rejects(store.clearAudit(), /Delete failed/);
+  deletion.mock.restore();
+  store.audit({ protocol: "ftp", action: "After failure", outcome: "success" });
+  await store.flushAudit();
+  assert.equal(await store.AuditLog.count(), 2);
+});
+
 test("protocol history persists, filters literally, paginates during new activity, and excludes web actions", async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "transfarr-logs-"));
   let store = new Store(path.join(directory, "data"));

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronLeft, ChevronRight, FileText, LoaderCircle, RefreshCw, Search } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, FileText, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
+import { DeleteConfirmDialog } from "@/components/delete-confirm-dialog";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,9 +34,13 @@ export function Logs() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [clearError, setClearError] = useState<string | null>(null);
   const before = cursors[cursors.length - 1];
 
   useEffect(() => {
+    if (clearing) return;
     const controller = new AbortController();
     let fetching = false;
     setLoading(true);
@@ -62,19 +67,22 @@ export function Logs() {
     const delay = window.setTimeout(() => void load(), 200);
     const timer = live && !before ? window.setInterval(() => void load(), 5000) : undefined;
     return () => { controller.abort(); window.clearTimeout(delay); window.clearInterval(timer); };
-  }, [search, protocol, outcome, before, live, refresh]);
+  }, [search, protocol, outcome, before, live, refresh, clearing]);
 
   return (
     <section className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <PageHeader title="Logs" description="File activity across FTP, FTPS, SFTP, and SMB." />
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
             <input type="checkbox" className="size-4 accent-primary" checked={live} onChange={event => setLive(event.target.checked)} />
             Auto-refresh
           </label>
-          <Button variant="outline" aria-label="Refresh logs" disabled={loading} onClick={() => setRefresh(value => value + 1)}>
+          <Button variant="outline" aria-label="Refresh logs" disabled={loading || clearing} onClick={() => setRefresh(value => value + 1)}>
             <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} />
+          </Button>
+          <Button variant="destructive" disabled={clearing} onClick={() => { setClearError(null); setConfirmClear(true); }}>
+            <Trash2 className="mr-2 size-4" />Clear all logs
           </Button>
         </div>
       </div>
@@ -150,6 +158,30 @@ export function Logs() {
           <Button variant="outline" disabled={loading || !data?.nextCursor} onClick={() => setCursors(value => [...value, data!.nextCursor])}>Older<ChevronRight className="ml-1 size-4" /></Button>
         </div>
       </div>
+      <DeleteConfirmDialog
+        open={confirmClear}
+        deleting={clearing}
+        title="Clear all logs?"
+        description="This permanently deletes all activity logs, including entries hidden by the current filters. New activity will continue to be logged."
+        error={clearError}
+        onCancel={() => setConfirmClear(false)}
+        onConfirm={async () => {
+          setClearing(true);
+          setClearError(null);
+          try {
+            await apiRequest("/api/v1/logs", { method: "DELETE" });
+            setData(null);
+            setExpanded(null);
+            setCursors([null]);
+            setRefresh(value => value + 1);
+            setConfirmClear(false);
+          } catch (error) {
+            setClearError((error as Error).message);
+          } finally {
+            setClearing(false);
+          }
+        }}
+      />
     </section>
   );
 }

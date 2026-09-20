@@ -1,5 +1,6 @@
 # Next
 
+* Added a clear-all button to permanently delete activity logs and reset log pagination.
 * Fixed SMB directory timestamp updates returning “operation not supported,” including metadata updates after creating folders in Apple clients.
 * Added persistent SMB named metadata streams (the equivalent of Samba's `streams_xattr`) for iOS Files compatibility, including stream enumeration and read-only access enforcement.
 * Fixed SMB maximal-access replies and padded CREATE requests for Apple client permission checks, while preserving read-only share restrictions.
