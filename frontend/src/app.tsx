@@ -252,7 +252,7 @@ export function App() {
               </NavLink>
             ))}
           </div>
-          <p className="mt-6 mb-2 px-2 text-[11px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">Debug</p>
+          <p className="mt-6 mb-2 px-2 text-[11px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">Analytics</p>
           <NavLink to="/logs" className={({ isActive }) =>
             `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring ${isActive ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-xs" : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground"}`
           }><FileText className="size-4" />Logs</NavLink>
